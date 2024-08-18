@@ -11,6 +11,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -79,25 +80,29 @@ func start(c *cli.Context) error {
 	defer db.Close()
 
 	account := common.HexToAddress("0xA13Ddb14437A8F34897131367ad3ca78416d6bCa")
-	/*
-		currentBlockNumber, err := Client.BlockNumber(context.Background())
-		if err != nil {
-			log.Fatal(err)
-		}
-		startBlock := big.NewInt(5157692)
-		ChunkSize := 1000
 
-	*/
+	currentBlockNumber, err := Client.BlockNumber(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// split the workload into chunks that can be digested by the API
 
 	// send them and build the event database
+	var startBlock *big.Int
+	starterBlockArg := c.Args().First()
+	if starterBlockArg == "" {
+		startBlock = big.NewInt(int64(currentBlockNumber - 3000))
+	} else {
+		bn, _ := strconv.ParseUint(starterBlockArg, 10, 64)
+		startBlock = big.NewInt(int64(bn))
+	}
 
 	topic := common.BytesToHash(common.FromHex("0x3e54d0825ed78523037d00a81759237eb436ce774bd546993ee67a1b67b6e766"))
 	fmt.Println("Topic:", topic.String())
 
 	query := ethereum.FilterQuery{
-		FromBlock: big.NewInt(6523000), //big.NewInt(6523000),
+		FromBlock: startBlock, //big.NewInt(6523000),
 		//ToBlock:   big.NewInt(3811),
 		Addresses: []common.Address{account},
 		Topics:    [][]common.Hash{{topic}},
