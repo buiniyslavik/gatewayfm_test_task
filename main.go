@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/urfave/cli/v2"
 	"log"
@@ -36,6 +37,16 @@ func (e *entry) Unmarshal(data []byte) {
 	e.ParentHash = data[32:64]
 	blkTime := data[64 : 64+8]
 	binary.Decode(blkTime, binary.NativeEndian, &e.BlockTime)
+}
+
+var Client *ethclient.Client
+
+func initEthclient() {
+	client, err := ethclient.Dial("https://rpc.ankr.com/eth_sepolia")
+	if err != nil {
+		log.Fatal(err)
+	}
+	Client = client
 }
 
 func main() {
@@ -86,9 +97,6 @@ func start(c *cli.Context) error {
 		log.Fatal(err)
 	}
 
-	// split the workload into chunks that can be digested by the API
-
-	// send them and build the event database
 	var startBlock *big.Int
 	starterBlockArg := c.Args().First()
 	if starterBlockArg == "" {
@@ -99,11 +107,9 @@ func start(c *cli.Context) error {
 	}
 
 	topic := common.BytesToHash(common.FromHex("0x3e54d0825ed78523037d00a81759237eb436ce774bd546993ee67a1b67b6e766"))
-	fmt.Println("Topic:", topic.String())
 
 	query := ethereum.FilterQuery{
 		FromBlock: startBlock, //big.NewInt(6523000),
-		//ToBlock:   big.NewInt(3811),
 		Addresses: []common.Address{account},
 		Topics:    [][]common.Hash{{topic}},
 	}
@@ -123,7 +129,7 @@ func start(c *cli.Context) error {
 		}
 		fmt.Println("PH, Time:", block.ParentHash, block.Time)
 		e := entry{
-			L1Root:     l.Data,
+			L1Root:     l.Data, // the event only has the L1 root in the data field so we can just take it as-is
 			BlockTime:  block.Time,
 			ParentHash: block.ParentHash.Bytes(),
 		}
