@@ -7,8 +7,11 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/urfave/cli/v2"
 	"log"
 	"math/big"
+	"os"
+	"time"
 )
 
 type entry struct {
@@ -21,9 +24,9 @@ func (e *entry) Marshal() []byte {
 	result := []byte{}
 	result = append(result, e.L1Root...)
 	result = append(result, e.ParentHash...)
-	time := make([]byte, 64)
-	binary.Encode(time, binary.NativeEndian, e.BlockTime)
-	result = append(result, time...)
+	timestamp := make([]byte, 8)
+	binary.Encode(timestamp, binary.NativeEndian, e.BlockTime)
+	result = append(result, timestamp...)
 	return result
 }
 
@@ -35,6 +38,38 @@ func (e *entry) Unmarshal(data []byte) {
 }
 
 func main() {
+	app := cli.App{
+		Name:  "Gateway.fm Assignment",
+		Usage: "Index certain Sepolia contract's events",
+		Authors: []*cli.Author{
+			{
+				Name:  "Sviatoslav Osin",
+				Email: "svosin@gmail.com",
+			},
+		},
+		Commands: []*cli.Command{
+			{
+				Name:    "run",
+				Aliases: []string{"r"},
+				Usage:   "Scrape the blockchain",
+				Action:  start,
+			},
+			{
+				Name:    "dump",
+				Aliases: []string{"d"},
+				Usage:   "Print collected events",
+				Action:  dump,
+			},
+		},
+	}
+
+	err := app.Run(os.Args)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func start(c *cli.Context) error {
 	initEthclient()
 
 	db, err := leveldb.OpenFile("events.ldb", nil)
@@ -87,12 +122,39 @@ func main() {
 			BlockTime:  block.Time,
 			ParentHash: block.ParentHash.Bytes(),
 		}
-		ctr := []byte{}
-		binary.Encode(ctr, binary.NativeEndian, counter)
+		ctr := make([]byte, 8)
+		_, err = binary.Encode(ctr, binary.NativeEndian, counter)
+		if err != nil {
+			log.Fatal(err)
+		}
 		err = db.Put(ctr, e.Marshal(), nil)
+		if err != nil {
+			log.Fatal(err)
+		}
 		counter++
 	}
 	fmt.Printf("processed %d entries\n", counter)
-	return
+	return nil
+}
 
+func dump(c *cli.Context) error {
+	db, err := leveldb.OpenFile("events.ldb", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	iter := db.NewIterator(nil, nil)
+	defer iter.Release()
+
+	for iter.Next() {
+		idx := iter.Key()
+
+		index := binary.NativeEndian.Uint64(idx)
+
+		var currEntry entry
+		currEntry.Unmarshal(iter.Value())
+		log.Println(index, time.Unix(int64(currEntry.BlockTime), 0), common.Bytes2Hex(currEntry.L1Root), common.Bytes2Hex(currEntry.ParentHash))
+	}
+	return nil
 }
