@@ -1,0 +1,98 @@
+package main
+
+import (
+	"context"
+	"encoding/binary"
+	"fmt"
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/syndtr/goleveldb/leveldb"
+	"log"
+	"math/big"
+)
+
+type entry struct {
+	BlockTime  uint64
+	L1Root     []byte
+	ParentHash []byte
+}
+
+func (e *entry) Marshal() []byte {
+	result := []byte{}
+	result = append(result, e.L1Root...)
+	result = append(result, e.ParentHash...)
+	time := make([]byte, 64)
+	binary.Encode(time, binary.NativeEndian, e.BlockTime)
+	result = append(result, time...)
+	return result
+}
+
+func (e *entry) Unmarshal(data []byte) {
+	e.L1Root = data[:32]
+	e.ParentHash = data[32:64]
+	blkTime := data[64 : 64+8]
+	binary.Decode(blkTime, binary.NativeEndian, &e.BlockTime)
+}
+
+func main() {
+	initEthclient()
+
+	db, err := leveldb.OpenFile("events.ldb", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	account := common.HexToAddress("0xA13Ddb14437A8F34897131367ad3ca78416d6bCa")
+	/*
+		currentBlockNumber, err := Client.BlockNumber(context.Background())
+		if err != nil {
+			log.Fatal(err)
+		}
+		startBlock := big.NewInt(5157692)
+		ChunkSize := 1000
+
+	*/
+
+	// split the workload into chunks that can be digested by the API
+
+	// send them and build the event database
+
+	topic := common.BytesToHash(common.FromHex("0x3e54d0825ed78523037d00a81759237eb436ce774bd546993ee67a1b67b6e766"))
+	fmt.Println("Topic:", topic.String())
+
+	query := ethereum.FilterQuery{
+		FromBlock: big.NewInt(6523000), //big.NewInt(6523000),
+		//ToBlock:   big.NewInt(3811),
+		Addresses: []common.Address{account},
+		Topics:    [][]common.Hash{{topic}},
+	}
+
+	logs, err := Client.FilterLogs(context.Background(), query)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var counter uint64
+
+	for _, l := range logs {
+		fmt.Println("Log Data:", l.Index, l.BlockNumber, common.Bytes2Hex(l.Data))
+		block, err := Client.HeaderByNumber(context.Background(), big.NewInt(int64(l.BlockNumber)))
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("PH, Time:", block.ParentHash, block.Time)
+		e := entry{
+			L1Root:     l.Data,
+			BlockTime:  block.Time,
+			ParentHash: block.ParentHash.Bytes(),
+		}
+		ctr := []byte{}
+		binary.Encode(ctr, binary.NativeEndian, counter)
+		err = db.Put(ctr, e.Marshal(), nil)
+		counter++
+	}
+	fmt.Printf("processed %d entries\n", counter)
+	return
+
+}
