@@ -72,6 +72,10 @@ var Client *ethclient.Client
 const RpcUrl = "https://rpc.ankr.com/eth_sepolia"
 const WindowSize = 3000 // seems to work for this endpoint, may be increased if supported
 
+var Account common.Address
+var Topic common.Hash
+var DB *leveldb.DB
+
 func initEthclient() {
 	client, err := ethclient.Dial(RpcUrl)
 	if err != nil {
@@ -114,14 +118,14 @@ func main() {
 
 func start(c *cli.Context) error {
 	initEthclient()
-
-	db, err := leveldb.OpenFile("events.ldb", nil)
+	var err error
+	DB, err = leveldb.OpenFile("events.ldb", nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer DB.Close()
 
-	account := common.HexToAddress("0xA13Ddb14437A8F34897131367ad3ca78416d6bCa")
+	Account = common.HexToAddress("0xA13Ddb14437A8F34897131367ad3ca78416d6bCa")
 
 	currentBlockNumber, err := Client.BlockNumber(context.Background())
 	if err != nil {
@@ -140,7 +144,7 @@ func start(c *cli.Context) error {
 
 	fmt.Println("starting block number:", startBlock)
 
-	topic := common.BytesToHash(common.FromHex("0x3e54d0825ed78523037d00a81759237eb436ce774bd546993ee67a1b67b6e766"))
+	Topic = common.BytesToHash(common.FromHex("0x3e54d0825ed78523037d00a81759237eb436ce774bd546993ee67a1b67b6e766"))
 
 	var startB, endB *big.Int
 	startB = big.NewInt(0).SetUint64(startBlock)
@@ -163,8 +167,8 @@ func start(c *cli.Context) error {
 		query := ethereum.FilterQuery{
 			FromBlock: startB, //big.NewInt(6523000),
 			ToBlock:   endB,
-			Addresses: []common.Address{account},
-			Topics:    [][]common.Hash{{topic}},
+			Addresses: []common.Address{Account},
+			Topics:    [][]common.Hash{{Topic}},
 		}
 		batchEntries := make(map[uint64]*Entry)
 		logs, err := Client.FilterLogs(context.Background(), query)
@@ -204,7 +208,7 @@ func start(c *cli.Context) error {
 			if err != nil {
 				log.Fatal(err)
 			}
-			err = db.Put(ctr, e.Marshal(), nil)
+			err = DB.Put(ctr, e.Marshal(), nil)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -292,4 +296,72 @@ func HeaderByNumberBatch(number []uint64) (map[uint64]*GetBlockResponse, error) 
 	}
 
 	return headers, err
+}
+
+type ChunkTask struct {
+	startB, endB *big.Int
+	dbIdx        uint64
+}
+
+// ProcessChunk takes a chan from where it reads the block range it needs to process
+func ProcessChunk(task chan ChunkTask, endpoint string) {
+	chunkTask := <-task
+
+	client, err := ethclient.Dial(RpcUrl)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("processing blocks", chunkTask.startB.String(), "-", chunkTask.endB.String())
+
+	query := ethereum.FilterQuery{
+		FromBlock: chunkTask.startB, //big.NewInt(6523000),
+		ToBlock:   chunkTask.endB,
+		Addresses: []common.Address{Account},
+		Topics:    [][]common.Hash{{Topic}},
+	}
+	batchEntries := make(map[uint64]*Entry)
+	logs, err := client.FilterLogs(context.Background(), query)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, l := range logs {
+		batchEntries[l.BlockNumber] = &Entry{
+			L1Root: l.Data,
+		}
+		// we have a map of half-baked entries, now we need to get the block headers
+	}
+
+	// we need to take a slice that is maps keys (block nums) and batch-feed it to the rpc
+	blockNumSlice := maps.Keys(batchEntries)
+	headerMap, err := HeaderByNumberBatch(blockNumSlice)
+	if err != nil {
+		panic(err)
+	}
+
+	for blockNum, hdr := range headerMap {
+		var blkTime uint64
+		blkTBytes := common.Hex2BytesFixed(hdr.Timestamp[2:], 8) // trim the 0x
+		_, err = binary.Decode(blkTBytes, binary.LittleEndian, &blkTime)
+		if err != nil {
+			panic(err)
+		}
+		batchEntries[blockNum].BlockTime = blkTime
+		batchEntries[blockNum].ParentHash = common.Hex2BytesFixed(hdr.ParentHash[2:], 32) // trim 0x as well
+
+	}
+
+	for _, e := range batchEntries {
+		ctr := make([]byte, 8)
+		_, err = binary.Encode(ctr, binary.NativeEndian, chunkTask.dbIdx)
+		if err != nil {
+			log.Fatal(err)
+		}
+		err = DB.Put(ctr, e.Marshal(), nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+		chunkTask.dbIdx++
+	}
 }
