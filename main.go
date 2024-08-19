@@ -259,8 +259,7 @@ func dump(c *cli.Context) error {
 	return nil
 }
 
-// HeaderByNumberBatch returns a block header from the current canonical chain. If number is
-// nil, the latest known header is returned.
+// HeaderByNumberBatch returns a block header from the current canonical chain.
 func HeaderByNumberBatch(number []uint64) (map[uint64]*GetBlockResponse, error) {
 	//batchElems := make([]rpc.BatchElem, len(number))
 	// check for special case
