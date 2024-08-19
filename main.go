@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -49,7 +50,7 @@ func (e *Entry) Marshal() []byte {
 	result = append(result, e.L1Root...)
 	result = append(result, e.ParentHash...)
 	timestamp := make([]byte, 8)
-	_, err := binary.Encode(timestamp, binary.NativeEndian, e.BlockTime)
+	_, err := binary.Encode(timestamp, binary.BigEndian, e.BlockTime)
 	if err != nil {
 		return nil
 	}
@@ -61,7 +62,7 @@ func (e *Entry) Unmarshal(data []byte) {
 	e.L1Root = data[:32]
 	e.ParentHash = data[32:64]
 	blkTime := data[64 : 64+8]
-	_, err := binary.Decode(blkTime, binary.NativeEndian, &e.BlockTime)
+	_, err := binary.Decode(blkTime, binary.BigEndian, &e.BlockTime)
 	if err != nil {
 		return
 	}
@@ -147,9 +148,8 @@ func start(c *cli.Context) error {
 	endB = big.NewInt(0).SetUint64(startBlock + WindowSize)
 
 	var counter uint64
-
+	var done bool
 	for {
-		var done bool
 
 		if endB.Cmp(currentBlockNumberBigint) == 1 {
 			endB = currentBlockNumberBigint
@@ -189,7 +189,7 @@ func start(c *cli.Context) error {
 		for blockNum, hdr := range headerMap {
 			var blkTime uint64
 			blkTBytes := common.Hex2BytesFixed(hdr.Timestamp[2:], 8) // trim the 0x
-			_, err = binary.Decode(blkTBytes, binary.LittleEndian, &blkTime)
+			_, err = binary.Decode(blkTBytes, binary.BigEndian, &blkTime)
 			if err != nil {
 				panic(err)
 			}
@@ -198,9 +198,18 @@ func start(c *cli.Context) error {
 
 		}
 
+		// sort everything by block time
+		entrySlice := []Entry{}
 		for _, e := range batchEntries {
+			entrySlice = append(entrySlice, *e)
+		}
+		sort.Slice(entrySlice, func(i, j int) bool {
+			return entrySlice[i].BlockTime < entrySlice[j].BlockTime
+		})
+
+		for _, e := range entrySlice {
 			ctr := make([]byte, 8)
-			_, err = binary.Encode(ctr, binary.NativeEndian, counter)
+			_, err = binary.Encode(ctr, binary.LittleEndian, counter)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -216,7 +225,12 @@ func start(c *cli.Context) error {
 		}
 		startB.Set(endB)
 		startB.Add(startB, big.NewInt(1))
-		endB.Add(endB, big.NewInt(WindowSize)) // move the window and repeat
+		endB.Add(startB, big.NewInt(WindowSize)) // move the window and repeat
+
+		if endB.Cmp(currentBlockNumberBigint) == 1 {
+			done = true
+		}
+
 	}
 
 	fmt.Printf("processed %d entries\n", counter)
@@ -286,7 +300,11 @@ func HeaderByNumberBatch(number []uint64) (map[uint64]*GetBlockResponse, error) 
 		log.Println(string(body))
 		return nil, err
 	}
-	// todo sort replies by id, ascending
+
+	sort.Slice(re, func(i, j int) bool {
+		return re[i].ID < re[j].ID
+	})
+
 	for i, el := range re {
 		headers[number[i]] = &el.Result
 	}
