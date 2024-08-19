@@ -328,7 +328,7 @@ func ProcessChunk(task chan ChunkTask, wg *sync.WaitGroup, m *sync.Mutex, counte
 	fmt.Println("processing blocks", startB.String(), "-", endB.String())
 
 	query := ethereum.FilterQuery{
-		FromBlock: startB, //big.NewInt(6523000),
+		FromBlock: startB,
 		ToBlock:   endB,
 		Addresses: []common.Address{Account},
 		Topics:    [][]common.Hash{{Topic}},
@@ -371,7 +371,17 @@ func ProcessChunk(task chan ChunkTask, wg *sync.WaitGroup, m *sync.Mutex, counte
 
 	}
 
+	// sort everything by block time
+	entrySlice := []Entry{}
 	for _, e := range batchEntries {
+		entrySlice = append(entrySlice, *e)
+	}
+	sort.Slice(entrySlice, func(i, j int) bool {
+		return entrySlice[i].BlockTime < entrySlice[j].BlockTime
+	})
+
+	// commit to leveldb
+	for _, e := range entrySlice {
 		ctr := make([]byte, 8)
 		_, err = binary.Encode(ctr, binary.NativeEndian, localCounter)
 		if err != nil {
