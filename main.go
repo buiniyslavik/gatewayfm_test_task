@@ -132,7 +132,7 @@ func start(c *cli.Context) error {
 	if err != nil {
 		log.Fatal(err)
 	}
-	currentBlockNumberBigint := big.NewInt(0).SetUint64(currentBlockNumber)
+	//currentBlockNumberBigint := big.NewInt(0).SetUint64(currentBlockNumber)
 
 	var startBlock uint64
 	starterBlockArg := c.Args().First()
@@ -148,41 +148,59 @@ func start(c *cli.Context) error {
 
 	Topic = common.BytesToHash(common.FromHex("0x3e54d0825ed78523037d00a81759237eb436ce774bd546993ee67a1b67b6e766"))
 
-	var startB, endB *big.Int
-	startB = big.NewInt(0).SetUint64(startBlock)
-	endB = big.NewInt(0).SetUint64(startBlock + WindowSize)
+	//var startB, endB *big.Int
+	/*
+		startB = big.NewInt(0).SetUint64(startBlock)
+		endB = big.NewInt(0).SetUint64(startBlock + WindowSize)
+	*/
+	endBlock := startBlock + WindowSize
+	if endBlock > currentBlockNumber {
+		endBlock = currentBlockNumber
+	}
 
 	var wg sync.WaitGroup
 	var m sync.Mutex // counter mutex
 	var counter uint64
 
-	tasks := make(chan ChunkTask, 1)
-
+	tasks := make(chan ChunkTask)
+	var done bool
 	for {
-		var done bool
 
-		if endB.Cmp(currentBlockNumberBigint) == 1 {
-			endB = currentBlockNumberBigint
-			if endB.Cmp(startB) == -1 {
-				break
+		/*
+			if endBlock > currentBlockNumber {
+				endBlock = currentBlockNumber
+				if endBlock < startBlock {
+					break
+				}
+				done = true
 			}
-			done = true
-		}
+
+		*/
+
+		wg.Add(1)
+		fmt.Println("starting worker for blocks ", startBlock, endBlock)
+		go ProcessChunk(tasks, &wg, &m, &counter, RpcUrl)
 
 		tasks <- ChunkTask{
-			startB: startB,
-			endB:   endB,
+			startBlock: startBlock,
+			endBlock:   endBlock,
 		}
-		wg.Add(1)
-		fmt.Println("starting worker for blocks ", startB.String(), endB.String())
-		go ProcessChunk(tasks, &wg, &m, &counter, RpcUrl)
 
 		if done {
 			break
 		}
-		startB.Set(endB)
-		startB.Add(startB, big.NewInt(1))
-		endB.Add(endB, big.NewInt(WindowSize)) // move the window and repeat
+		/*
+			startBlock = endBlock + 1
+			endBlock = startBlock + WindowSize // move the window and repeat
+
+		*/
+		startBlock = endBlock + 1
+		endBlock = startBlock + WindowSize
+		if endBlock > currentBlockNumber {
+			endBlock = currentBlockNumber
+			done = true
+		}
+
 	}
 	wg.Wait()
 	fmt.Printf("processed %d entries\n", counter)
@@ -261,7 +279,7 @@ func HeaderByNumberBatch(number []uint64) (map[uint64]*GetBlockResponse, error) 
 }
 
 type ChunkTask struct {
-	startB, endB *big.Int
+	startBlock, endBlock uint64
 }
 
 // ProcessChunk takes a chan from where it reads the block range it needs to process
@@ -271,16 +289,19 @@ func ProcessChunk(task chan ChunkTask, wg *sync.WaitGroup, m *sync.Mutex, counte
 
 	chunkTask := <-task // get our chunk boundaries
 
+	startB := big.NewInt(0).SetUint64(chunkTask.startBlock)
+	endB := big.NewInt(0).SetUint64(chunkTask.endBlock)
+
 	client, err := ethclient.Dial(endpoint)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Println("processing blocks", chunkTask.startB.String(), "-", chunkTask.endB.String())
+	fmt.Println("processing blocks", startB.String(), "-", endB.String())
 
 	query := ethereum.FilterQuery{
-		FromBlock: chunkTask.startB, //big.NewInt(6523000),
-		ToBlock:   chunkTask.endB,
+		FromBlock: startB, //big.NewInt(6523000),
+		ToBlock:   endB,
 		Addresses: []common.Address{Account},
 		Topics:    [][]common.Hash{{Topic}},
 	}
