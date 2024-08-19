@@ -71,11 +71,28 @@ func (e *Entry) Unmarshal(data []byte) {
 var Client *ethclient.Client
 
 const RpcUrl = "https://rpc.ankr.com/eth_sepolia"
-const WindowSize = 3000 // seems to work for this endpoint, may be increased if supported
+const WindowSize = 500
 
 var Account common.Address
 var Topic common.Hash
 var DB *leveldb.DB
+
+var RPCS = []string{
+	//"https://endpoints.omniatech.io/v1/eth/sepolia/public", // rate limits too low
+	"https://rpc.ankr.com/eth_sepolia",
+	"https://ethereum-sepolia-rpc.publicnode.com",
+	"https://eth-sepolia-public.unifra.io",
+	"https://eth-sepolia.public.blastapi.io",
+}
+var iter int
+
+// NextRPC round-robin for endpoints
+func NextRPC() string {
+	if iter == len(RPCS)-1 {
+		iter = 0
+	}
+	return RPCS[iter]
+}
 
 func initEthclient() {
 	client, err := ethclient.Dial(RpcUrl)
@@ -161,9 +178,11 @@ func start(c *cli.Context) error {
 	var wg sync.WaitGroup
 	var m sync.Mutex // counter mutex
 	var counter uint64
+	var counterDrift uint64
 
 	tasks := make(chan ChunkTask)
 	var done bool
+
 	for {
 
 		/*
@@ -179,12 +198,14 @@ func start(c *cli.Context) error {
 
 		wg.Add(1)
 		fmt.Println("starting worker for blocks ", startBlock, endBlock)
-		go ProcessChunk(tasks, &wg, &m, &counter, RpcUrl)
+		go ProcessChunk(tasks, &wg, &m, &counter, NextRPC())
 
 		tasks <- ChunkTask{
 			startBlock: startBlock,
 			endBlock:   endBlock,
 		}
+
+		//counterDrift++ // compensating increments inside the worker
 
 		if done {
 			break
@@ -203,7 +224,7 @@ func start(c *cli.Context) error {
 
 	}
 	wg.Wait()
-	fmt.Printf("processed %d entries\n", counter)
+	fmt.Printf("processed %d entries\n", counter-counterDrift)
 	return nil
 }
 
@@ -231,7 +252,7 @@ func dump(c *cli.Context) error {
 
 // HeaderByNumberBatch returns a block header from the current canonical chain. If number is
 // nil, the latest known header is returned.
-func HeaderByNumberBatch(number []uint64) (map[uint64]*GetBlockResponse, error) {
+func HeaderByNumberBatch(number []uint64, rpc string) (map[uint64]*GetBlockResponse, error) {
 	//batchElems := make([]rpc.BatchElem, len(number))
 	// check for special case
 	if len(number) == 2 && number[0] == number[1] {
@@ -255,7 +276,7 @@ func HeaderByNumberBatch(number []uint64) (map[uint64]*GetBlockResponse, error) 
 	if err != nil {
 		panic(err)
 	}
-	resp, err := http.Post(RpcUrl, "application/json", strings.NewReader(string(data)))
+	resp, err := http.Post(rpc, "application/json", strings.NewReader(string(data)))
 	if err != nil {
 		return nil, err
 	}
@@ -268,6 +289,7 @@ func HeaderByNumberBatch(number []uint64) (map[uint64]*GetBlockResponse, error) 
 	err = json.Unmarshal(body, &re)
 	if err != nil {
 		log.Println(string(body))
+		log.Println("caused by EP: ", rpc)
 		return nil, err
 	}
 	// todo sort replies by id, ascending
@@ -319,14 +341,14 @@ func ProcessChunk(task chan ChunkTask, wg *sync.WaitGroup, m *sync.Mutex, counte
 	}
 
 	// now we know the number of events, so we can add it to the global counter, get a local copy and release the mutex
-	eventsThisChunk := len(logs)
+	eventsThisChunk := len(logs) - 1
 	localCounter := *counter
 	*counter += uint64(eventsThisChunk) + 1
 	m.Unlock()
 
 	// we need to take a slice that is maps keys (block nums) and batch-feed it to the rpc
 	blockNumSlice := maps.Keys(batchEntries)
-	headerMap, err := HeaderByNumberBatch(blockNumSlice)
+	headerMap, err := HeaderByNumberBatch(blockNumSlice, endpoint)
 	if err != nil {
 		panic(err)
 	}
@@ -334,7 +356,7 @@ func ProcessChunk(task chan ChunkTask, wg *sync.WaitGroup, m *sync.Mutex, counte
 	for blockNum, hdr := range headerMap {
 		var blkTime uint64
 		blkTBytes := common.Hex2BytesFixed(hdr.Timestamp[2:], 8) // trim the 0x
-		_, err = binary.Decode(blkTBytes, binary.LittleEndian, &blkTime)
+		_, err = binary.Decode(blkTBytes, binary.BigEndian, &blkTime)
 		if err != nil {
 			panic(err)
 		}
