@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -293,6 +294,11 @@ func HeaderByNumberBatch(number []uint64, rpc string) (map[uint64]*GetBlockRespo
 		return nil, err
 	}
 	// todo sort replies by id, ascending
+
+	sort.Slice(re, func(i, j int) bool {
+		return re[i].ID < re[j].ID
+	})
+
 	for i, el := range re {
 		headers[number[i]] = &el.Result
 	}
