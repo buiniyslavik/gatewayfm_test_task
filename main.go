@@ -152,7 +152,6 @@ func start(c *cli.Context) error {
 		var done bool
 
 		if endB.Cmp(currentBlockNumberBigint) == 1 {
-			fmt.Println("ending run")
 			endB = currentBlockNumberBigint
 			if endB.Cmp(startB) == -1 {
 				break
@@ -218,8 +217,6 @@ func start(c *cli.Context) error {
 		startB.Set(endB)
 		startB.Add(startB, big.NewInt(1))
 		endB.Add(endB, big.NewInt(WindowSize)) // move the window and repeat
-		fmt.Println("Next batch...")
-		//time.Sleep(1 * time.Second) // safe back-off
 	}
 
 	fmt.Printf("processed %d entries\n", counter)
