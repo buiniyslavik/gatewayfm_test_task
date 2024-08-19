@@ -3,25 +3,48 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/urfave/cli/v2"
+	"golang.org/x/exp/maps"
+	"io"
 	"log"
 	"math/big"
+	"net/http"
 	"os"
 	"strconv"
+	"strings"
 )
 
-type entry struct {
+type Entry struct {
 	BlockTime  uint64
 	L1Root     []byte
 	ParentHash []byte
 }
 
-func (e *entry) Marshal() []byte {
+type RPCRequest struct {
+	Version string        `json:"jsonrpc"`
+	ID      int           `json:"id"`
+	Method  string        `json:"method"`
+	Params  []interface{} `json:"params"`
+}
+
+type RPCResponse struct {
+	Version string           `json:"jsonrpc"`
+	ID      int              `json:"id"`
+	Result  GetBlockResponse `json:"result"`
+}
+
+type GetBlockResponse struct {
+	ParentHash string `json:"parentHash"`
+	Timestamp  string `json:"timestamp"`
+}
+
+func (e *Entry) Marshal() []byte {
 	result := []byte{}
 	result = append(result, e.L1Root...)
 	result = append(result, e.ParentHash...)
@@ -34,7 +57,7 @@ func (e *entry) Marshal() []byte {
 	return result
 }
 
-func (e *entry) Unmarshal(data []byte) {
+func (e *Entry) Unmarshal(data []byte) {
 	e.L1Root = data[:32]
 	e.ParentHash = data[32:64]
 	blkTime := data[64 : 64+8]
@@ -46,8 +69,11 @@ func (e *entry) Unmarshal(data []byte) {
 
 var Client *ethclient.Client
 
+const RpcUrl = "https://rpc.ankr.com/eth_sepolia"
+const WindowSize = 3000 // seems to work for this endpoint, may be increased if supported
+
 func initEthclient() {
-	client, err := ethclient.Dial("https://rpc.ankr.com/eth_sepolia")
+	client, err := ethclient.Dial(RpcUrl)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -68,7 +94,7 @@ func main() {
 			{
 				Name:    "run",
 				Aliases: []string{"r"},
-				Usage:   "Scrape the blockchain",
+				Usage:   "Scrape the blockchain. Pass the number of blocks to look back at, default = 3000",
 				Action:  start,
 			},
 			{
@@ -103,12 +129,10 @@ func start(c *cli.Context) error {
 	}
 	currentBlockNumberBigint := big.NewInt(0).SetUint64(currentBlockNumber)
 
-	//var queryStartBlock *big.Int
 	var startBlock uint64
 	starterBlockArg := c.Args().First()
 	if starterBlockArg == "" {
-		//queryStartBlock = big.NewInt(int64(currentBlockNumber - 3000))
-		startBlock = currentBlockNumber - 3000
+		startBlock = currentBlockNumber - WindowSize
 	} else {
 		rewindAmount, _ := strconv.ParseUint(starterBlockArg, 10, 64)
 		startBlock = currentBlockNumber - rewindAmount
@@ -120,17 +144,18 @@ func start(c *cli.Context) error {
 
 	var startB, endB *big.Int
 	startB = big.NewInt(0).SetUint64(startBlock)
-	endB = big.NewInt(0).SetUint64(startBlock + 3000)
+	endB = big.NewInt(0).SetUint64(startBlock + WindowSize)
 
 	var counter uint64
 
 	for {
 		var done bool
+
 		if endB.Cmp(currentBlockNumberBigint) == 1 {
 			fmt.Println("ending run")
 			endB = currentBlockNumberBigint
 			if endB.Cmp(startB) == -1 {
-				startB = endB
+				break
 			}
 			done = true
 		}
@@ -142,26 +167,39 @@ func start(c *cli.Context) error {
 			Addresses: []common.Address{account},
 			Topics:    [][]common.Hash{{topic}},
 		}
-
+		batchEntries := make(map[uint64]*Entry)
 		logs, err := Client.FilterLogs(context.Background(), query)
 		if err != nil {
 			log.Fatal(err)
 		}
 
 		for _, l := range logs {
-			//fmt.Println("Log Data:", l.Index, l.BlockNumber, common.Bytes2Hex(l.Data))
+			batchEntries[l.BlockNumber] = &Entry{
+				L1Root: l.Data,
+			}
+			// we have a map of half-baked entries, now we need to get the block headers
+		}
 
-			block, err := Client.HeaderByNumber(context.Background(), big.NewInt(int64(l.BlockNumber)))
+		// we need to take a slice that is maps keys (block nums) and batch-feed it to the rpc
+		blockNumSlice := maps.Keys(batchEntries)
+		headerMap, err := HeaderByNumberBatch(blockNumSlice)
+		if err != nil {
+			panic(err)
+		}
+
+		for blockNum, hdr := range headerMap {
+			var blkTime uint64
+			blkTBytes := common.Hex2BytesFixed(hdr.Timestamp[2:], 8) // trim the 0x
+			_, err = binary.Decode(blkTBytes, binary.LittleEndian, &blkTime)
 			if err != nil {
-				log.Fatal(err)
+				panic(err)
 			}
-			//fmt.Println(block.Number)
-			//fmt.Println("PH, Time:", block.ParentHash, block.Time)
-			e := entry{
-				L1Root:     l.Data, // the event only has the L1 root in the data field so we can just take it as-is
-				BlockTime:  block.Time,
-				ParentHash: block.ParentHash.Bytes(),
-			}
+			batchEntries[blockNum].BlockTime = blkTime
+			batchEntries[blockNum].ParentHash = common.Hex2BytesFixed(hdr.ParentHash[2:], 32) // trim 0x as well
+
+		}
+
+		for _, e := range batchEntries {
 			ctr := make([]byte, 8)
 			_, err = binary.Encode(ctr, binary.NativeEndian, counter)
 			if err != nil {
@@ -179,7 +217,7 @@ func start(c *cli.Context) error {
 		}
 		startB.Set(endB)
 		startB.Add(startB, big.NewInt(1))
-		endB.Add(endB, big.NewInt(3000)) // move the window and repeat
+		endB.Add(endB, big.NewInt(WindowSize)) // move the window and repeat
 		fmt.Println("Next batch...")
 		//time.Sleep(1 * time.Second) // safe back-off
 	}
@@ -203,9 +241,58 @@ func dump(c *cli.Context) error {
 
 		index := binary.NativeEndian.Uint64(idx)
 
-		var currEntry entry
+		var currEntry Entry
 		currEntry.Unmarshal(iter.Value())
 		fmt.Println(index, currEntry.BlockTime, common.Bytes2Hex(currEntry.L1Root), common.Bytes2Hex(currEntry.ParentHash))
 	}
 	return nil
+}
+
+// HeaderByNumberBatch returns a block header from the current canonical chain. If number is
+// nil, the latest known header is returned.
+func HeaderByNumberBatch(number []uint64) (map[uint64]*GetBlockResponse, error) {
+	//batchElems := make([]rpc.BatchElem, len(number))
+	// check for special case
+	if len(number) == 2 && number[0] == number[1] {
+		number = number[:0]
+	}
+
+	requests := []RPCRequest{}
+	headers := make(map[uint64]*GetBlockResponse, len(number))
+	for i, bn := range number {
+		be := RPCRequest{
+			Version: "2.0",
+			ID:      i,
+			Method:  "eth_getBlockByNumber",
+			Params:  []interface{}{strconv.FormatUint(bn, 10), false},
+		}
+
+		requests = append(requests, be)
+	}
+
+	data, err := json.Marshal(requests)
+	if err != nil {
+		panic(err)
+	}
+	resp, err := http.Post(RpcUrl, "application/json", strings.NewReader(string(data)))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	re := make([]RPCResponse, len(number))
+	err = json.Unmarshal(body, &re)
+	if err != nil {
+		log.Println(string(body))
+		return nil, err
+	}
+	// todo sort replies by id, ascending
+	for i, el := range re {
+		headers[number[i]] = &el.Result
+	}
+
+	return headers, err
 }
