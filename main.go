@@ -168,61 +168,7 @@ func start(c *cli.Context) error {
 			}
 			done = true
 		}
-		/*
-			fmt.Println("processing blocks", startB.String(), "-", endB.String())
 
-			query := ethereum.FilterQuery{
-				FromBlock: startB, //big.NewInt(6523000),
-				ToBlock:   endB,
-				Addresses: []common.Address{Account},
-				Topics:    [][]common.Hash{{Topic}},
-			}
-			batchEntries := make(map[uint64]*Entry)
-			logs, err := Client.FilterLogs(context.Background(), query)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			for _, l := range logs {
-				batchEntries[l.BlockNumber] = &Entry{
-					L1Root: l.Data,
-				}
-				// we have a map of half-baked entries, now we need to get the block headers
-			}
-
-			// we need to take a slice that is maps keys (block nums) and batch-feed it to the rpc
-			blockNumSlice := maps.Keys(batchEntries)
-			headerMap, err := HeaderByNumberBatch(blockNumSlice)
-			if err != nil {
-				panic(err)
-			}
-
-			for blockNum, hdr := range headerMap {
-				var blkTime uint64
-				blkTBytes := common.Hex2BytesFixed(hdr.Timestamp[2:], 8) // trim the 0x
-				_, err = binary.Decode(blkTBytes, binary.LittleEndian, &blkTime)
-				if err != nil {
-					panic(err)
-				}
-				batchEntries[blockNum].BlockTime = blkTime
-				batchEntries[blockNum].ParentHash = common.Hex2BytesFixed(hdr.ParentHash[2:], 32) // trim 0x as well
-
-			}
-
-			for _, e := range batchEntries {
-				ctr := make([]byte, 8)
-				_, err = binary.Encode(ctr, binary.NativeEndian, counter)
-				if err != nil {
-					log.Fatal(err)
-				}
-				err = DB.Put(ctr, e.Marshal(), nil)
-				if err != nil {
-					log.Fatal(err)
-				}
-				counter++
-			}
-
-		*/
 		tasks <- ChunkTask{
 			startB: startB,
 			endB:   endB,
