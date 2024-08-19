@@ -28,24 +28,6 @@ type Entry struct {
 	ParentHash []byte
 }
 
-type RPCRequest struct {
-	Version string        `json:"jsonrpc"`
-	ID      int           `json:"id"`
-	Method  string        `json:"method"`
-	Params  []interface{} `json:"params"`
-}
-
-type RPCResponse struct {
-	Version string           `json:"jsonrpc"`
-	ID      int              `json:"id"`
-	Result  GetBlockResponse `json:"result"`
-}
-
-type GetBlockResponse struct {
-	ParentHash string `json:"parentHash"`
-	Timestamp  string `json:"timestamp"`
-}
-
 func (e *Entry) Marshal() []byte {
 	result := []byte{}
 	result = append(result, e.L1Root...)
@@ -69,34 +51,55 @@ func (e *Entry) Unmarshal(data []byte) {
 	}
 }
 
+type RPCRequest struct {
+	Version string        `json:"jsonrpc"`
+	ID      int           `json:"id"`
+	Method  string        `json:"method"`
+	Params  []interface{} `json:"params"`
+}
+
+type RPCResponse struct {
+	Version string           `json:"jsonrpc"`
+	ID      int              `json:"id"`
+	Result  GetBlockResponse `json:"result"`
+}
+
+type GetBlockResponse struct {
+	ParentHash string `json:"parentHash"`
+	Timestamp  string `json:"timestamp"`
+}
+
+type ChunkTask struct {
+	startBlock, endBlock uint64
+}
+
 var Client *ethclient.Client
 
-const RpcUrl = "https://rpc.ankr.com/eth_sepolia"
 const WindowSize = 500
 
 var Account common.Address
 var Topic common.Hash
 var DB *leveldb.DB
 
-var RPCS = []string{
+var rpcs = []string{
 	//"https://endpoints.omniatech.io/v1/eth/sepolia/public", // rate limits too low
 	"https://rpc.ankr.com/eth_sepolia",
 	"https://ethereum-sepolia-rpc.publicnode.com",
 	"https://eth-sepolia-public.unifra.io",
 	"https://eth-sepolia.public.blastapi.io",
 }
-var iter int
+var rpcIter int
 
 // NextRPC round-robin for endpoints
 func NextRPC() string {
-	if iter == len(RPCS)-1 {
-		iter = 0
+	if rpcIter == len(rpcs)-1 {
+		rpcIter = 0
 	}
-	return RPCS[iter]
+	return rpcs[rpcIter]
 }
 
 func initEthclient() {
-	client, err := ethclient.Dial(RpcUrl)
+	client, err := ethclient.Dial(NextRPC())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -117,7 +120,7 @@ func main() {
 			{
 				Name:    "run",
 				Aliases: []string{"r"},
-				Usage:   "Scrape the blockchain. Pass the number of blocks to look back at, default = 3000",
+				Usage:   "Scrape the blockchain. Pass the number of blocks to look back at, default = " + strconv.Itoa(WindowSize),
 				Action:  start,
 			},
 			{
@@ -145,12 +148,12 @@ func start(c *cli.Context) error {
 	defer DB.Close()
 
 	Account = common.HexToAddress("0xA13Ddb14437A8F34897131367ad3ca78416d6bCa")
+	Topic = common.BytesToHash(common.FromHex("0x3e54d0825ed78523037d00a81759237eb436ce774bd546993ee67a1b67b6e766"))
 
 	currentBlockNumber, err := Client.BlockNumber(context.Background())
 	if err != nil {
 		log.Fatal(err)
 	}
-	//currentBlockNumberBigint := big.NewInt(0).SetUint64(currentBlockNumber)
 
 	var startBlock uint64
 	starterBlockArg := c.Args().First()
@@ -162,15 +165,8 @@ func start(c *cli.Context) error {
 		startBlock = currentBlockNumber - rewindAmount
 	}
 
-	fmt.Println("starting block number:", startBlock)
+	//fmt.Println("starting block number:", startBlock)
 
-	Topic = common.BytesToHash(common.FromHex("0x3e54d0825ed78523037d00a81759237eb436ce774bd546993ee67a1b67b6e766"))
-
-	//var startB, endB *big.Int
-	/*
-		startB = big.NewInt(0).SetUint64(startBlock)
-		endB = big.NewInt(0).SetUint64(startBlock + WindowSize)
-	*/
 	endBlock := startBlock + WindowSize
 	if endBlock > currentBlockNumber {
 		endBlock = currentBlockNumber
@@ -179,24 +175,11 @@ func start(c *cli.Context) error {
 	var wg sync.WaitGroup
 	var m sync.Mutex // counter mutex
 	var counter uint64
-	var counterDrift uint64
 
 	tasks := make(chan ChunkTask)
 	var done bool
 
 	for {
-
-		/*
-			if endBlock > currentBlockNumber {
-				endBlock = currentBlockNumber
-				if endBlock < startBlock {
-					break
-				}
-				done = true
-			}
-
-		*/
-
 		wg.Add(1)
 		fmt.Println("starting worker for blocks ", startBlock, endBlock)
 		go ProcessChunk(tasks, &wg, &m, &counter, NextRPC())
@@ -206,16 +189,10 @@ func start(c *cli.Context) error {
 			endBlock:   endBlock,
 		}
 
-		//counterDrift++ // compensating increments inside the worker
-
 		if done {
 			break
 		}
-		/*
-			startBlock = endBlock + 1
-			endBlock = startBlock + WindowSize // move the window and repeat
 
-		*/
 		startBlock = endBlock + 1
 		endBlock = startBlock + WindowSize
 		if endBlock > currentBlockNumber {
@@ -225,7 +202,7 @@ func start(c *cli.Context) error {
 
 	}
 	wg.Wait()
-	fmt.Printf("processed %d entries\n", counter-counterDrift)
+	fmt.Printf("processed %d entries\n", counter)
 	return nil
 }
 
@@ -251,8 +228,7 @@ func dump(c *cli.Context) error {
 	return nil
 }
 
-// HeaderByNumberBatch returns a block header from the current canonical chain. If number is
-// nil, the latest known header is returned.
+// HeaderByNumberBatch returns block headers from the current canonical chain.
 func HeaderByNumberBatch(number []uint64, rpc string) (map[uint64]*GetBlockResponse, error) {
 	//batchElems := make([]rpc.BatchElem, len(number))
 	// check for special case
@@ -260,6 +236,7 @@ func HeaderByNumberBatch(number []uint64, rpc string) (map[uint64]*GetBlockRespo
 		number = number[:0]
 	}
 
+	// since geth's batch client didn't want to play along, I'm rolling my own
 	requests := []RPCRequest{}
 	headers := make(map[uint64]*GetBlockResponse, len(number))
 	for i, bn := range number {
@@ -293,7 +270,6 @@ func HeaderByNumberBatch(number []uint64, rpc string) (map[uint64]*GetBlockRespo
 		log.Println("caused by EP: ", rpc)
 		return nil, err
 	}
-	// todo sort replies by id, ascending
 
 	sort.Slice(re, func(i, j int) bool {
 		return re[i].ID < re[j].ID
@@ -304,10 +280,6 @@ func HeaderByNumberBatch(number []uint64, rpc string) (map[uint64]*GetBlockRespo
 	}
 
 	return headers, err
-}
-
-type ChunkTask struct {
-	startBlock, endBlock uint64
 }
 
 // ProcessChunk takes a chan from where it reads the block range it needs to process
@@ -325,7 +297,7 @@ func ProcessChunk(task chan ChunkTask, wg *sync.WaitGroup, m *sync.Mutex, counte
 		log.Fatal(err)
 	}
 
-	fmt.Println("processing blocks", startB.String(), "-", endB.String())
+	//fmt.Println("processing blocks", startB.String(), "-", endB.String())
 
 	query := ethereum.FilterQuery{
 		FromBlock: startB,
