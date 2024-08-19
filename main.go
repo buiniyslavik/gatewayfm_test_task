@@ -18,6 +18,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type Entry struct {
@@ -137,6 +138,7 @@ func start(c *cli.Context) error {
 	starterBlockArg := c.Args().First()
 	if starterBlockArg == "" {
 		startBlock = currentBlockNumber - WindowSize
+
 	} else {
 		rewindAmount, _ := strconv.ParseUint(starterBlockArg, 10, 64)
 		startBlock = currentBlockNumber - rewindAmount
@@ -150,7 +152,11 @@ func start(c *cli.Context) error {
 	startB = big.NewInt(0).SetUint64(startBlock)
 	endB = big.NewInt(0).SetUint64(startBlock + WindowSize)
 
+	var wg sync.WaitGroup
+	var m sync.Mutex // counter mutex
 	var counter uint64
+
+	tasks := make(chan ChunkTask, 1)
 
 	for {
 		var done bool
@@ -162,58 +168,68 @@ func start(c *cli.Context) error {
 			}
 			done = true
 		}
-		fmt.Println("processing blocks", startB.String(), "-", endB.String())
+		/*
+			fmt.Println("processing blocks", startB.String(), "-", endB.String())
 
-		query := ethereum.FilterQuery{
-			FromBlock: startB, //big.NewInt(6523000),
-			ToBlock:   endB,
-			Addresses: []common.Address{Account},
-			Topics:    [][]common.Hash{{Topic}},
-		}
-		batchEntries := make(map[uint64]*Entry)
-		logs, err := Client.FilterLogs(context.Background(), query)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		for _, l := range logs {
-			batchEntries[l.BlockNumber] = &Entry{
-				L1Root: l.Data,
+			query := ethereum.FilterQuery{
+				FromBlock: startB, //big.NewInt(6523000),
+				ToBlock:   endB,
+				Addresses: []common.Address{Account},
+				Topics:    [][]common.Hash{{Topic}},
 			}
-			// we have a map of half-baked entries, now we need to get the block headers
-		}
+			batchEntries := make(map[uint64]*Entry)
+			logs, err := Client.FilterLogs(context.Background(), query)
+			if err != nil {
+				log.Fatal(err)
+			}
 
-		// we need to take a slice that is maps keys (block nums) and batch-feed it to the rpc
-		blockNumSlice := maps.Keys(batchEntries)
-		headerMap, err := HeaderByNumberBatch(blockNumSlice)
-		if err != nil {
-			panic(err)
-		}
+			for _, l := range logs {
+				batchEntries[l.BlockNumber] = &Entry{
+					L1Root: l.Data,
+				}
+				// we have a map of half-baked entries, now we need to get the block headers
+			}
 
-		for blockNum, hdr := range headerMap {
-			var blkTime uint64
-			blkTBytes := common.Hex2BytesFixed(hdr.Timestamp[2:], 8) // trim the 0x
-			_, err = binary.Decode(blkTBytes, binary.LittleEndian, &blkTime)
+			// we need to take a slice that is maps keys (block nums) and batch-feed it to the rpc
+			blockNumSlice := maps.Keys(batchEntries)
+			headerMap, err := HeaderByNumberBatch(blockNumSlice)
 			if err != nil {
 				panic(err)
 			}
-			batchEntries[blockNum].BlockTime = blkTime
-			batchEntries[blockNum].ParentHash = common.Hex2BytesFixed(hdr.ParentHash[2:], 32) // trim 0x as well
 
-		}
+			for blockNum, hdr := range headerMap {
+				var blkTime uint64
+				blkTBytes := common.Hex2BytesFixed(hdr.Timestamp[2:], 8) // trim the 0x
+				_, err = binary.Decode(blkTBytes, binary.LittleEndian, &blkTime)
+				if err != nil {
+					panic(err)
+				}
+				batchEntries[blockNum].BlockTime = blkTime
+				batchEntries[blockNum].ParentHash = common.Hex2BytesFixed(hdr.ParentHash[2:], 32) // trim 0x as well
 
-		for _, e := range batchEntries {
-			ctr := make([]byte, 8)
-			_, err = binary.Encode(ctr, binary.NativeEndian, counter)
-			if err != nil {
-				log.Fatal(err)
 			}
-			err = DB.Put(ctr, e.Marshal(), nil)
-			if err != nil {
-				log.Fatal(err)
+
+			for _, e := range batchEntries {
+				ctr := make([]byte, 8)
+				_, err = binary.Encode(ctr, binary.NativeEndian, counter)
+				if err != nil {
+					log.Fatal(err)
+				}
+				err = DB.Put(ctr, e.Marshal(), nil)
+				if err != nil {
+					log.Fatal(err)
+				}
+				counter++
 			}
-			counter++
+
+		*/
+		tasks <- ChunkTask{
+			startB: startB,
+			endB:   endB,
 		}
+		wg.Add(1)
+		fmt.Println("starting worker for blocks ", startB.String(), endB.String())
+		go ProcessChunk(tasks, &wg, &m, &counter, RpcUrl)
 
 		if done {
 			break
@@ -222,7 +238,7 @@ func start(c *cli.Context) error {
 		startB.Add(startB, big.NewInt(1))
 		endB.Add(endB, big.NewInt(WindowSize)) // move the window and repeat
 	}
-
+	wg.Wait()
 	fmt.Printf("processed %d entries\n", counter)
 	return nil
 }
@@ -300,14 +316,16 @@ func HeaderByNumberBatch(number []uint64) (map[uint64]*GetBlockResponse, error) 
 
 type ChunkTask struct {
 	startB, endB *big.Int
-	dbIdx        uint64
 }
 
 // ProcessChunk takes a chan from where it reads the block range it needs to process
-func ProcessChunk(task chan ChunkTask, endpoint string) {
-	chunkTask := <-task
+func ProcessChunk(task chan ChunkTask, wg *sync.WaitGroup, m *sync.Mutex, counter *uint64, endpoint string) {
+	defer wg.Done()
+	m.Lock() // we need to know how many events are in this chunk to keep the counter consistent
 
-	client, err := ethclient.Dial(RpcUrl)
+	chunkTask := <-task // get our chunk boundaries
+
+	client, err := ethclient.Dial(endpoint)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -333,6 +351,12 @@ func ProcessChunk(task chan ChunkTask, endpoint string) {
 		// we have a map of half-baked entries, now we need to get the block headers
 	}
 
+	// now we know the number of events, so we can add it to the global counter, get a local copy and release the mutex
+	eventsThisChunk := len(logs)
+	localCounter := *counter
+	*counter += uint64(eventsThisChunk) + 1
+	m.Unlock()
+
 	// we need to take a slice that is maps keys (block nums) and batch-feed it to the rpc
 	blockNumSlice := maps.Keys(batchEntries)
 	headerMap, err := HeaderByNumberBatch(blockNumSlice)
@@ -354,7 +378,7 @@ func ProcessChunk(task chan ChunkTask, endpoint string) {
 
 	for _, e := range batchEntries {
 		ctr := make([]byte, 8)
-		_, err = binary.Encode(ctr, binary.NativeEndian, chunkTask.dbIdx)
+		_, err = binary.Encode(ctr, binary.NativeEndian, localCounter)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -362,6 +386,6 @@ func ProcessChunk(task chan ChunkTask, endpoint string) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		chunkTask.dbIdx++
+		localCounter++
 	}
 }
